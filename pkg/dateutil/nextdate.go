@@ -1,4 +1,4 @@
-package api
+package dateutil
 
 import (
 	"errors"
@@ -8,17 +8,19 @@ import (
 	"time"
 )
 
-func NextDate(now time.Time, dstart string, repeat string) (string, error) {
-	if repeat == "" {
+const DateFormat = "20060102"
+
+func NextDate(now time.Time, date string, rule string) (string, error) {
+	if rule == "" {
 		return "", errors.New("повторение не указано")
 	}
 
-	startDate, err := time.Parse(DateFormat, dstart)
+	startDate, err := time.Parse(DateFormat, date)
 	if err != nil {
 		return "", fmt.Errorf("некорректная дата начала: %v", err)
 	}
 
-	parts := strings.Fields(repeat)
+	parts := strings.Fields(rule)
 	if len(parts) == 0 {
 		return "", errors.New("неверный формат правила")
 	}

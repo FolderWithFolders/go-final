@@ -1,26 +1,22 @@
 package server
 
 import (
+	"go1f/pkg/api"
+	"go1f/pkg/config"
+	"go1f/pkg/db"
 	"log"
 	"net/http"
-	"os"
-
-	"go1f/pkg/api"
 )
 
-func StartServer() {
-	api.Init() // Инициализация API
+func StartServer(store *db.Store, cfg *config.Config) {
+	api := api.NewAPI(store, cfg)
+	api.Init()
 
 	server := http.FileServer(http.Dir("./web"))
 	http.Handle("/", server)
 
-	port := os.Getenv("TODO_PORT")
-	if port == "" {
-		port = "7540"
-	}
-
-	log.Println("Listening on :" + port + "...")
-	err := http.ListenAndServe(":"+port, nil)
+	log.Println("Сервер запущен на порту:", cfg.Port)
+	err := http.ListenAndServe(":"+cfg.Port, nil)
 	if err != nil {
 		log.Fatal(err)
 	}

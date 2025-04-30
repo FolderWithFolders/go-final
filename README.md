@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Планировщик задач (TODO List)
 
 Веб-сервер для управления задачами с поддержкой повторяющихся событий и SQLite-базой данных.
@@ -56,22 +55,25 @@
 ## 🐳 Запуск через Docker
 
 ### 1. Dockerfile
-FROM golang:latest AS builder \
+# Этап сборки
+FROM golang:1.23.3-alpine AS builder 
+
 WORKDIR /app \
 COPY go.mod go.sum ./ \
 RUN go mod download \
 COPY . . \
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o server ./main.go
 
-FROM ubuntu:latest \
+# Этап запуска
+FROM alpine:3.20 \
 WORKDIR /app \
-COPY --from=builder /app/server . \
+COPY --from=builder /app/server . \  
 COPY web ./web \
 ENV TODO_PORT=7540 \
-    TODO_DBFILE=/app/scheduler.db \
-    TODO_PASSWORD="ваш-пароль" \
+    TODO_DBFILE=/data/scheduler.db \
+    TODO_PASSWORD="" \
 EXPOSE ${TODO_PORT} \
-VOLUME /app \
+VOLUME /data \
 CMD ["./server"] 
 
 ### 2. Сборка образа:
@@ -80,7 +82,7 @@ docker build -t todo-app .
 ### 3. Запуск контейнера:
 docker run -d \
   -p 7540:7540 \
-  -v $(pwd)/scheduler.db:/app/scheduler.db \
+  -v todo-data:/data \
   -e TODO_PASSWORD="ваш-пароль" \
   todo-app
 

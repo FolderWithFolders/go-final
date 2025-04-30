@@ -4,10 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"go1f/pkg/config"
+	"go1f/pkg/dateutil"
 	"go1f/pkg/db"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -15,75 +16,146 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const DateFormat = "20060102"
+const (
+	DateFormat      = "20060102"
+	DefaultPageSize = 50
+)
 
-func Init() {
-	http.HandleFunc("/api/signin", handleSignIn)
-	http.HandleFunc("/api/nextdate", nextDateHandler)
-	http.HandleFunc("/api/task", authMiddleware(taskHandler))
-	http.HandleFunc("/api/tasks", authMiddleware(tasksHandler))
-	http.HandleFunc("/api/task/done", authMiddleware(handleTaskDone))
+type API struct {
+	store  *db.Store
+	config *config.Config
 }
 
-// Обработчик для /api/nextdate
-func nextDateHandler(w http.ResponseWriter, r *http.Request) {
+func NewAPI(store *db.Store, cfg *config.Config) *API {
+	return &API{store: store, config: cfg}
+}
+
+func (a *API) Init() {
+	http.HandleFunc("/api/signin", a.handleSignIn)
+	http.HandleFunc("/api/nextdate", a.nextDateHandler)
+	http.HandleFunc("/api/task", a.authMiddleware(a.taskHandler))
+	http.HandleFunc("/api/tasks", a.authMiddleware(a.tasksHandler))
+	http.HandleFunc("/api/task/done", a.authMiddleware(a.handleTaskDone))
+}
+
+// Структуры для сериализации задач
+type JSONTask struct {
+	ID      string `json:"id"`
+	Date    string `json:"date"`
+	Title   string `json:"title"`
+	Comment string `json:"comment"`
+	Repeat  string `json:"repeat"`
+}
+
+type TasksResp struct {
+	Tasks []JSONTask `json:"tasks"`
+}
+
+// Обработчик GET /api/tasks
+func (a *API) tasksHandler(w http.ResponseWriter, r *http.Request) {
+	search := r.URL.Query().Get("search")
+	limitStr := r.URL.Query().Get("limit")
+	limit := DefaultPageSize
+
+	if limitStr != "" {
+		var err error
+		limit, err = strconv.Atoi(limitStr)
+		if err != nil || limit < 1 {
+			a.writeError(w, r, http.StatusBadRequest, "некорректный параметр limit")
+			return
+		}
+	}
+
+	tasks, err := a.store.Tasks(limit, search)
+	if err != nil {
+		a.writeError(w, r, http.StatusInternalServerError, "ошибка получения задач")
+		return
+	}
+
+	jsonTasks := make([]JSONTask, 0, len(tasks))
+	for _, task := range tasks {
+		jsonTasks = append(jsonTasks, JSONTask{
+			ID:      strconv.FormatInt(task.ID, 10),
+			Date:    task.Date,
+			Title:   task.Title,
+			Comment: task.Comment,
+			Repeat:  task.Repeat,
+		})
+	}
+
+	a.writeJSON(w, r, http.StatusOK, TasksResp{Tasks: jsonTasks})
+}
+
+// Обработчик /api/nextdate
+func (a *API) nextDateHandler(w http.ResponseWriter, r *http.Request) {
 	nowParam := r.FormValue("now")
 	dateParam := r.FormValue("date")
 	repeat := r.FormValue("repeat")
 
+	// Проверка обязательных параметров
+	if dateParam == "" || repeat == "" {
+		a.writeError(w, r, http.StatusBadRequest, "не указаны параметры date или repeat")
+		return
+	}
+
+	// Парсинг даты 'now'
 	var now time.Time
 	if nowParam == "" {
 		now = time.Now()
 	} else {
 		var err error
-		now, err = time.Parse(DateFormat, nowParam)
+		now, err = time.Parse(dateutil.DateFormat, nowParam)
 		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "некорректный параметр 'now'")
+			a.writeError(w, r, http.StatusBadRequest, "некорректный параметр 'now'")
 			return
 		}
 	}
 
-	nextDate, err := NextDate(now, dateParam, repeat)
+	// Вызов функции из пакета dateutil
+	nextDate, err := dateutil.NextDate(now, dateParam, repeat)
 	if err != nil {
-		writeError(w, r, http.StatusBadRequest, err.Error())
+		a.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 
+	// Отправка ответа
 	w.Header().Set("Content-Type", "text/plain")
 	w.Write([]byte(nextDate))
+
+	log.Printf("Запрос /api/nextdate: now=%s, date=%s, repeat=%s", nowParam, dateParam, repeat)
 }
 
 // Основной обработчик для /api/task
-func taskHandler(w http.ResponseWriter, r *http.Request) {
+func (a *API) taskHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodDelete:
-		handleDeleteTask(w, r)
+		a.handleDeleteTask(w, r)
 	case http.MethodGet:
-		handleGetTask(w, r)
+		a.handleGetTask(w, r)
 	case http.MethodPost:
-		handleAddTask(w, r)
+		a.handleAddTask(w, r)
 	case http.MethodPut:
-		handleUpdateTask(w, r)
+		a.handleUpdateTask(w, r)
 	default:
-		writeError(w, r, http.StatusMethodNotAllowed, "Метод не поддерживается")
+		a.writeError(w, r, http.StatusMethodNotAllowed, "Метод не поддерживается")
 	}
 }
 
 // Обработчик GET /api/task?id=...
-func handleGetTask(w http.ResponseWriter, r *http.Request) {
+func (a *API) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	if id == "" {
-		writeError(w, r, http.StatusBadRequest, "Не указан идентификатор")
+		a.writeError(w, r, http.StatusBadRequest, "Не указан идентификатор")
 		return
 	}
 
-	task, err := db.GetTask(id)
+	task, err := a.store.GetTask(id)
 	if err != nil {
-		writeError(w, r, http.StatusNotFound, err.Error())
+		a.writeError(w, r, http.StatusNotFound, err.Error())
 		return
 	}
 
-	writeJSON(w, r, http.StatusOK, map[string]string{
+	a.writeJSON(w, r, http.StatusOK, map[string]string{
 		"id":      strconv.FormatInt(task.ID, 10),
 		"date":    task.Date,
 		"title":   task.Title,
@@ -93,8 +165,7 @@ func handleGetTask(w http.ResponseWriter, r *http.Request) {
 }
 
 // Обработчик POST /api/task
-// Обработчик POST /api/task
-func handleAddTask(w http.ResponseWriter, r *http.Request) {
+func (a *API) handleAddTask(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Date    string `json:"date"`
 		Title   string `json:"title"`
@@ -103,7 +174,7 @@ func handleAddTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		writeError(w, r, http.StatusBadRequest, "Ошибка десериализации JSON")
+		a.writeError(w, r, http.StatusBadRequest, "Ошибка десериализации JSON")
 		return
 	}
 
@@ -115,7 +186,7 @@ func handleAddTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if task.Title == "" {
-		writeError(w, r, http.StatusBadRequest, "Не указан заголовок задачи")
+		a.writeError(w, r, http.StatusBadRequest, "Не указан заголовок задачи")
 		return
 	}
 
@@ -126,15 +197,15 @@ func handleAddTask(w http.ResponseWriter, r *http.Request) {
 
 	t, err := time.Parse(DateFormat, task.Date)
 	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "Некорректный формат даты")
+		a.writeError(w, r, http.StatusBadRequest, "Некорректный формат даты")
 		return
 	}
 	t = t.Truncate(24 * time.Hour)
 
 	if task.Repeat != "" {
-		_, err := NextDate(now, task.Date, task.Repeat)
+		_, err := dateutil.NextDate(now, task.Date, task.Repeat)
 		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "Некорректное правило повторения")
+			a.writeError(w, r, http.StatusBadRequest, "Некорректное правило повторения")
 			return
 		}
 	}
@@ -143,27 +214,26 @@ func handleAddTask(w http.ResponseWriter, r *http.Request) {
 		if task.Repeat == "" {
 			task.Date = now.Format(DateFormat)
 		} else {
-			nextDate, err := NextDate(now, task.Date, task.Repeat)
+			nextDate, err := dateutil.NextDate(now, task.Date, task.Repeat)
 			if err != nil {
-				writeError(w, r, http.StatusBadRequest, err.Error())
+				a.writeError(w, r, http.StatusBadRequest, err.Error())
 				return
 			}
 			task.Date = nextDate
 		}
 	}
 
-	// Добавляем задачу и получаем сгенерированный ID
-	id, err := db.AddTask(&task)
+	id, err := a.store.AddTask(&task)
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, err.Error())
+		a.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	writeJSON(w, r, http.StatusOK, map[string]interface{}{"id": id})
+	a.writeJSON(w, r, http.StatusOK, map[string]interface{}{"id": id})
 }
 
 // Обработчик PUT /api/task
-func handleUpdateTask(w http.ResponseWriter, r *http.Request) {
+func (a *API) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		ID      string `json:"id"`
 		Date    string `json:"date"`
@@ -173,14 +243,13 @@ func handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		writeError(w, r, http.StatusBadRequest, "Ошибка десериализации JSON")
+		a.writeError(w, r, http.StatusBadRequest, "Ошибка десериализации JSON")
 		return
 	}
 
-	// Преобразование строки ID в int64
 	id, err := strconv.ParseInt(request.ID, 10, 64)
 	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "Некорректный ID задачи")
+		a.writeError(w, r, http.StatusBadRequest, "Некорректный ID задачи")
 		return
 	}
 
@@ -192,13 +261,11 @@ func handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 		Repeat:  request.Repeat,
 	}
 
-	// Проверка обязательных полей
 	if task.Title == "" {
-		writeError(w, r, http.StatusBadRequest, "Не указан заголовок задачи")
+		a.writeError(w, r, http.StatusBadRequest, "Не указан заголовок задачи")
 		return
 	}
 
-	// Коррекция даты
 	now := time.Now().Truncate(24 * time.Hour)
 	if task.Date == "" {
 		task.Date = now.Format(DateFormat)
@@ -206,92 +273,87 @@ func handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 
 	parsedDate, err := time.Parse(DateFormat, task.Date)
 	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "Некорректный формат даты")
+		a.writeError(w, r, http.StatusBadRequest, "Некорректный формат даты")
 		return
 	}
 
-	// Если дата в прошлом и есть правило повторения
 	if parsedDate.Before(now) && task.Repeat != "" {
-		nextDate, err := NextDate(now, task.Date, task.Repeat)
+		nextDate, err := dateutil.NextDate(now, task.Date, task.Repeat)
 		if err != nil {
-			writeError(w, r, http.StatusBadRequest, err.Error())
+			a.writeError(w, r, http.StatusBadRequest, err.Error())
 			return
 		}
 		task.Date = nextDate
 	}
 
-	// Обновление задачи в БД
-	if err := db.UpdateTask(&task); err != nil {
-		writeError(w, r, http.StatusInternalServerError, err.Error())
+	if err := a.store.UpdateTask(&task); err != nil {
+		a.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	writeJSON(w, r, http.StatusOK, map[string]interface{}{})
+	a.writeJSON(w, r, http.StatusOK, map[string]interface{}{})
 }
 
-func handleDeleteTask(w http.ResponseWriter, r *http.Request) {
+// Обработчик DELETE /api/task
+func (a *API) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	if id == "" {
-		writeError(w, r, http.StatusBadRequest, "Не указан ID")
+		a.writeError(w, r, http.StatusBadRequest, "Не указан ID")
 		return
 	}
 
-	if err := db.DeleteTask(id); err != nil {
-		writeError(w, r, http.StatusInternalServerError, err.Error())
+	if err := a.store.DeleteTask(id); err != nil {
+		a.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	writeJSON(w, r, http.StatusOK, map[string]interface{}{})
+	a.writeJSON(w, r, http.StatusOK, map[string]interface{}{})
 }
 
 // Обработчик POST /api/task/done
-func handleTaskDone(w http.ResponseWriter, r *http.Request) {
+func (a *API) handleTaskDone(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeError(w, r, http.StatusMethodNotAllowed, "Метод не поддерживается")
+		a.writeError(w, r, http.StatusMethodNotAllowed, "Метод не поддерживается")
 		return
 	}
 
 	id := r.URL.Query().Get("id")
 	if id == "" {
-		writeError(w, r, http.StatusBadRequest, "Не указан ID")
+		a.writeError(w, r, http.StatusBadRequest, "Не указан ID")
 		return
 	}
 
-	// Получаем задачу
-	task, err := db.GetTask(id)
+	task, err := a.store.GetTask(id)
 	if err != nil {
-		writeError(w, r, http.StatusNotFound, err.Error())
+		a.writeError(w, r, http.StatusNotFound, err.Error())
 		return
 	}
 
 	now := time.Now().Truncate(24 * time.Hour)
 	if task.Repeat == "" {
-		// Удаляем одноразовую задачу
-		if err := db.DeleteTask(id); err != nil {
-			writeError(w, r, http.StatusInternalServerError, err.Error())
+		if err := a.store.DeleteTask(id); err != nil {
+			a.writeError(w, r, http.StatusInternalServerError, err.Error())
 			return
 		}
 	} else {
-		// Рассчитываем следующую дату
-		nextDate, err := NextDate(now, task.Date, task.Repeat)
+		nextDate, err := dateutil.NextDate(now, task.Date, task.Repeat)
 		if err != nil {
-			writeError(w, r, http.StatusBadRequest, err.Error())
+			a.writeError(w, r, http.StatusBadRequest, err.Error())
 			return
 		}
-		// Обновляем дату
-		if err := db.UpdateDate(nextDate, id); err != nil {
-			writeError(w, r, http.StatusInternalServerError, err.Error())
+		if err := a.store.UpdateDate(nextDate, id); err != nil {
+			a.writeError(w, r, http.StatusInternalServerError, err.Error())
 			return
 		}
 	}
 
-	writeJSON(w, r, http.StatusOK, map[string]interface{}{})
+	a.writeJSON(w, r, http.StatusOK, map[string]interface{}{})
 }
 
 // Обработчик POST /api/signin
-func handleSignIn(w http.ResponseWriter, r *http.Request) {
+func (a *API) handleSignIn(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeError(w, r, http.StatusMethodNotAllowed, "Метод не поддерживается")
+		a.writeError(w, r, http.StatusMethodNotAllowed, "Метод не поддерживается")
 		return
 	}
 
@@ -299,22 +361,21 @@ func handleSignIn(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		writeError(w, r, http.StatusBadRequest, "Ошибка формата запроса")
+		a.writeError(w, r, http.StatusBadRequest, "Ошибка формата запроса")
 		return
 	}
 
-	envPassword := os.Getenv("TODO_PASSWORD")
+	envPassword := a.config.Password
 	if envPassword == "" {
-		writeJSON(w, r, http.StatusOK, map[string]string{"token": ""})
+		a.writeJSON(w, r, http.StatusOK, map[string]string{"token": ""})
 		return
 	}
 
-	if request.Password != envPassword {
-		writeError(w, r, http.StatusUnauthorized, "Неверный пароль")
+	if request.Password != a.config.Password {
+		a.writeError(w, r, http.StatusUnauthorized, "Неверный пароль")
 		return
 	}
 
-	// Генерация JWT-токена
 	hash := sha256.Sum256([]byte(envPassword))
 	claims := jwt.MapClaims{
 		"hash": hex.EncodeToString(hash[:]),
@@ -323,58 +384,53 @@ func handleSignIn(w http.ResponseWriter, r *http.Request) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := token.SignedString([]byte(envPassword))
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "Ошибка генерации токена")
+		a.writeError(w, r, http.StatusInternalServerError, "Ошибка генерации токена")
 		return
 	}
 
-	// Установка куки
 	http.SetCookie(w, &http.Cookie{
 		Name:     "token",
 		Value:    tokenString,
 		Expires:  time.Now().Add(8 * time.Hour),
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   false, // Для HTTPS установить true
+		Secure:   false,
 	})
 
-	writeJSON(w, r, http.StatusOK, map[string]string{"token": tokenString})
+	a.writeJSON(w, r, http.StatusOK, map[string]string{"token": tokenString})
 }
 
-// Middleware для проверки аутентификации (исправленная версия)
-func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+// Middleware для аутентификации
+func (a *API) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		envPassword := os.Getenv("TODO_PASSWORD")
-		if envPassword == "" {
+		if a.config.Password == "" { // Теперь берем из конфига
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Проверка куки
 		cookie, err := r.Cookie("token")
 		if err != nil {
-			writeError(w, r, http.StatusUnauthorized, "Требуется аутентификация")
+			a.writeError(w, r, http.StatusUnauthorized, "Требуется аутентификация")
 			return
 		}
 
-		// Валидация токена
 		token, err := jwt.Parse(cookie.Value, func(t *jwt.Token) (interface{}, error) {
-			return []byte(envPassword), nil
+			return []byte(a.config.Password), nil
 		})
 		if err != nil || !token.Valid {
-			writeError(w, r, http.StatusUnauthorized, "Неверный токен")
+			a.writeError(w, r, http.StatusUnauthorized, "Неверный токен")
 			return
 		}
 
-		// Проверка хэша пароля
 		claims, ok := token.Claims.(jwt.MapClaims)
 		if !ok {
-			writeError(w, r, http.StatusUnauthorized, "Ошибка формата токена")
+			a.writeError(w, r, http.StatusUnauthorized, "Ошибка формата токена")
 			return
 		}
 
-		currentHash := sha256.Sum256([]byte(envPassword))
+		currentHash := sha256.Sum256([]byte(a.config.Password))
 		if hex.EncodeToString(currentHash[:]) != claims["hash"] {
-			writeError(w, r, http.StatusUnauthorized, "Токен устарел")
+			a.writeError(w, r, http.StatusUnauthorized, "Токен устарел")
 			return
 		}
 
@@ -382,11 +438,10 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// Вспомогательные функции// Вспомогательные функции
-func writeJSON(w http.ResponseWriter, r *http.Request, status int, data interface{}) {
+// Вспомогательные методы
+func (a *API) writeJSON(w http.ResponseWriter, r *http.Request, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 
-	// Установка куки для /api/signin
 	if r != nil && strings.Contains(r.URL.Path, "/api/signin") {
 		if m, ok := data.(map[string]string); ok && m["token"] != "" {
 			http.SetCookie(w, &http.Cookie{
@@ -405,6 +460,6 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, data interfac
 	}
 }
 
-func writeError(w http.ResponseWriter, r *http.Request, status int, message string) {
-	writeJSON(w, r, status, map[string]string{"error": message})
+func (a *API) writeError(w http.ResponseWriter, r *http.Request, status int, message string) {
+	a.writeJSON(w, r, status, map[string]string{"error": message})
 }

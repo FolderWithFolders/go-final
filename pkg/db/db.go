@@ -6,8 +6,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var db *sql.DB
-
 const schema = `
 CREATE TABLE IF NOT EXISTS scheduler (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -19,18 +17,23 @@ CREATE TABLE IF NOT EXISTS scheduler (
 CREATE INDEX IF NOT EXISTS idx_date ON scheduler(date);
 `
 
-func Init(dbFile string) error {
-	var err error
-	db, err = sql.Open("sqlite", dbFile)
+type Store struct {
+	db *sql.DB
+}
+
+func NewStore(dbFile string) (*Store, error) {
+	db, err := sql.Open("sqlite", dbFile)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// Execute schema creation
-	_, err = db.Exec(schema)
-	if err != nil {
-		return err
+	if _, err = db.Exec(schema); err != nil {
+		return nil, err
 	}
 
-	return nil
+	return &Store{db: db}, nil
+}
+
+func (s *Store) Close() error {
+	return s.db.Close()
 }

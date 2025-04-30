@@ -1,5 +1,5 @@
 # Этап сборки приложения
-FROM golang:latest AS builder
+FROM golang:1.23.3-alpine AS builder
 
 WORKDIR /app
 
@@ -12,7 +12,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o server ./main.go
 
 # Этап запуска
-FROM ubuntu:latest
+FROM alpine:3.20
 
 WORKDIR /app
 

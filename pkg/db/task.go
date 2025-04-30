@@ -16,20 +16,18 @@ type Task struct {
 	Repeat  string `json:"repeat"`
 }
 
-func AddTask(task *Task) (int64, error) {
-	query := `INSERT INTO scheduler (date, title, comment, repeat) VALUES (?, ?, ?, ?)`
-	res, err := db.Exec(query, task.Date, task.Title, task.Comment, task.Repeat)
+func (s *Store) AddTask(task *Task) (int64, error) {
+	res, err := s.db.Exec(
+		`INSERT INTO scheduler (date, title, comment, repeat) VALUES (?, ?, ?, ?)`,
+		task.Date, task.Title, task.Comment, task.Repeat,
+	)
 	if err != nil {
 		return 0, err
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
-	return id, nil
+	return res.LastInsertId()
 }
 
-func Tasks(limit int, search string) ([]*Task, error) {
+func (s *Store) Tasks(limit int, search string) ([]*Task, error) {
 	query := "SELECT id, date, title, comment, repeat FROM scheduler"
 	args := []interface{}{}
 
@@ -47,7 +45,7 @@ func Tasks(limit int, search string) ([]*Task, error) {
 	query += " ORDER BY date LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := db.Query(query, args...)
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка запроса: %v", err)
 	}
@@ -62,6 +60,11 @@ func Tasks(limit int, search string) ([]*Task, error) {
 		tasks = append(tasks, &t)
 	}
 
+	// Проверка на ошибки после итерации
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ошибка при обработке результатов: %v", err)
+	}
+
 	if tasks == nil {
 		tasks = make([]*Task, 0)
 	}
@@ -69,10 +72,10 @@ func Tasks(limit int, search string) ([]*Task, error) {
 	return tasks, nil
 }
 
-func GetTask(id string) (*Task, error) {
+func (s *Store) GetTask(id string) (*Task, error) {
 	var task Task
 	query := "SELECT id, date, title, comment, repeat FROM scheduler WHERE id = ?"
-	row := db.QueryRow(query, id)
+	row := s.db.QueryRow(query, id)
 	err := row.Scan(&task.ID, &task.Date, &task.Title, &task.Comment, &task.Repeat)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -83,18 +86,9 @@ func GetTask(id string) (*Task, error) {
 	return &task, nil
 }
 
-// UpdateTask обновляет существующую задачу
-// UpdateTask обновляет существующую задачу
-func UpdateTask(task *Task) error {
+func (s *Store) UpdateTask(task *Task) error {
 	query := `UPDATE scheduler SET date=?, title=?, comment=?, repeat=? WHERE id=?`
-	res, err := db.Exec(
-		query,
-		task.Date,
-		task.Title,
-		task.Comment,
-		task.Repeat,
-		task.ID,
-	)
+	res, err := s.db.Exec(query, task.Date, task.Title, task.Comment, task.Repeat, task.ID)
 	if err != nil {
 		return fmt.Errorf("ошибка обновления: %v", err)
 	}
@@ -109,10 +103,9 @@ func UpdateTask(task *Task) error {
 	return nil
 }
 
-// DeleteTask удаляет задачу по ID
-func DeleteTask(id string) error {
+func (s *Store) DeleteTask(id string) error {
 	query := `DELETE FROM scheduler WHERE id = ?`
-	res, err := db.Exec(query, id)
+	res, err := s.db.Exec(query, id)
 	if err != nil {
 		return fmt.Errorf("ошибка удаления: %v", err)
 	}
@@ -126,10 +119,9 @@ func DeleteTask(id string) error {
 	return nil
 }
 
-// UpdateDate обновляет дату выполнения задачи
-func UpdateDate(next string, id string) error {
+func (s *Store) UpdateDate(next string, id string) error {
 	query := `UPDATE scheduler SET date = ? WHERE id = ?`
-	res, err := db.Exec(query, next, id)
+	res, err := s.db.Exec(query, next, id)
 	if err != nil {
 		return fmt.Errorf("ошибка обновления даты: %v", err)
 	}
