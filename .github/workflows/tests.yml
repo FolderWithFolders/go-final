@@ -25,6 +25,8 @@ jobs:
       run: go mod tidy
 
     - name: Run local server
+      env:
+        TODO_PASSWORD: "secret123"
       run: |
         CGO_ENABLED=0 GOOS=linux go run main.go &
         sleep 100
