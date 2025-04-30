@@ -22,7 +22,7 @@
 
 ### Шаги:
 1. Клонировать репозиторий:
-- git clone https://github.com/yourusername/todo-app.git
+- git clone https://github.com/FolderWithFolders/go-final.git
 - cd todo-app
 
 2. Настроить переменные окружения (пример `.env`):
